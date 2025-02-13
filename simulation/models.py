@@ -1,8 +1,11 @@
 """
 Models module for the NIO Digital Twin Simulation.
 
-This module defines the classes representing the entities in the simulation,
-such as vehicles, production stages, quality checks, and components.
+This module defines classes representing the entities in the simulation,
+including vehicles with rich properties, production lines with detailed
+production steps, advanced quality check logic, and various production stations.
+Additional classes such as Component, AssemblyStation, and PaintingStation
+are also defined to simulate various parts of the production process.
 """
 
 import simpy
@@ -22,122 +25,155 @@ if not logger.handlers:
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
+###############################################################################
+# Vehicle Class
+###############################################################################
 
 class Vehicle:
     """
-    Represents a vehicle produced on the production line.
-
+    Represents a vehicle produced on the production line with rich properties.
+    
     Attributes:
         id (int): Unique identifier for the vehicle.
         creation_time (float): Simulation time when the vehicle was created.
         status (str): Current status of the vehicle.
-        assembly_history (list): Log of steps completed during production.
-        quality_checks (list): Log of quality check results.
-        components (dict): Dictionary of components added to the vehicle.
+        color (str): Vehicle color.
+        engine_type (str): Type of engine installed.
+        components (dict): Dictionary storing installed components.
+        production_history (list): Log of production steps and their timestamps.
+        quality_history (list): Log of quality checks performed on the vehicle.
+        maintenance_needed (bool): Flag indicating if maintenance is required.
+        additional_features (dict): Extra configurable features.
     """
     def __init__(self, vehicle_id, creation_time):
         self.id = vehicle_id
         self.creation_time = creation_time
         self.status = "created"
-        self.assembly_history = []
-        self.quality_checks = []
+        self.color = random.choice(["Red", "Blue", "Green", "Black", "White"])
+        self.engine_type = random.choice(["Electric", "Hybrid", "Internal Combustion"])
         self.components = {}
+        self.production_history = []
+        self.quality_history = []
+        self.maintenance_needed = False
+        self.additional_features = {
+            "autonomous_driving": random.choice([True, False]),
+            "infotainment": "Basic",
+            "safety_rating": None,
+        }
     
     def update_status(self, new_status):
-        logger.debug("Vehicle %d: Changing status from %s to %s", self.id, self.status, new_status)
+        logger.debug("Vehicle %d: Status updated from %s to %s", self.id, self.status, new_status)
         self.status = new_status
+        self.production_history.append((f"Status updated to {new_status}", time.time()))
     
-    def add_assembly_step(self, step):
+    def add_production_step(self, step_name, description=""):
         timestamp = time.time()
-        logger.debug("Vehicle %d: Adding assembly step: %s at %s", self.id, step, timestamp)
-        self.assembly_history.append((step, timestamp))
+        logger.debug("Vehicle %d: Production step added: %s at %s. %s", self.id, step_name, timestamp, description)
+        self.production_history.append((step_name, timestamp, description))
     
-    def add_quality_check(self, check_result):
+    def add_quality_check(self, check_details):
         timestamp = time.time()
-        logger.debug("Vehicle %d: Adding quality check result: %s at %s", self.id, check_result, timestamp)
-        self.quality_checks.append((check_result, timestamp))
+        logger.debug("Vehicle %d: Quality check added: %s at %s", self.id, check_details, timestamp)
+        self.quality_history.append((check_details, timestamp))
     
-    def add_component(self, component_name, details):
-        logger.debug("Vehicle %d: Adding component %s with details %s", self.id, component_name, details)
-        self.components[component_name] = details
+    def add_component(self, component_name, component_details):
+        logger.debug("Vehicle %d: Adding component %s with details %s", self.id, component_name, component_details)
+        self.components[component_name] = component_details
+        self.add_production_step(f"Installed {component_name}", "Component installation completed.")
+    
+    def mark_for_maintenance(self):
+        self.maintenance_needed = True
+        self.add_production_step("Marked for maintenance", "Quality issues detected.")
+        logger.info("Vehicle %d marked for maintenance.", self.id)
     
     def get_summary(self):
         summary = {
             "id": self.id,
-            "status": self.status,
             "creation_time": self.creation_time,
-            "assembly_history": self.assembly_history,
-            "quality_checks": self.quality_checks,
+            "status": self.status,
+            "color": self.color,
+            "engine_type": self.engine_type,
             "components": self.components,
+            "production_history": self.production_history,
+            "quality_history": self.quality_history,
+            "maintenance_needed": self.maintenance_needed,
+            "additional_features": self.additional_features,
         }
         return summary
 
+###############################################################################
+# ProductionLine Class
+###############################################################################
 
 class ProductionLine:
     """
-    Simulates the production process of vehicles.
-
-    The production process includes several stations:
-      - Assembly
-      - Painting
-      - Inspection
-      - Testing
-
-    Each station takes a random amount of time to process a vehicle.
+    Simulates the production process for vehicles with detailed production steps.
+    
+    The production process includes multiple steps such as welding, assembly, painting,
+    inspection, testing, and packaging.
     """
     def __init__(self, env):
         self.env = env
         self.vehicle_count = 0
         self.vehicles = []
-        self.production_rate = 1  # Vehicles per simulation cycle
-        self.station_durations = {
-            "assembly": (2, 5),    # (min_time, max_time)
-            "painting": (1, 3),
-            "inspection": (1, 2),
-            "testing": (2, 4)
-        }
         self.logger = logger
+        self.production_rate = 1  # Vehicles per cycle
     
     def produce_vehicle(self):
         """
-        Create a new vehicle and add it to the production list.
+        Create a new vehicle and log its production.
         """
         self.vehicle_count += 1
         vehicle = Vehicle(vehicle_id=self.vehicle_count, creation_time=self.env.now)
         self.vehicles.append(vehicle)
-        self.logger.info("Vehicle %d produced at simulation time %s", vehicle.id, self.env.now)
+        self.logger.info("Vehicle %d produced at simulation time %.2f", vehicle.id, self.env.now)
+        vehicle.add_production_step("Vehicle Produced", "Vehicle creation completed.")
         return vehicle
-    
-    def start_production(self):
-        """
-        Process that continuously produces vehicles.
-        """
-        while True:
-            vehicle = self.produce_vehicle()
-            self.env.process(self.process_vehicle(vehicle))
-            yield self.env.timeout(1 / self.production_rate)
     
     def process_vehicle(self, vehicle):
         """
-        Process a single vehicle through all production stations.
+        Process a vehicle through detailed production steps.
         """
+        # Welding step
+        yield self.env.process(self.welding_station(vehicle))
+        # Assembly step
         yield self.env.process(self.assembly_station(vehicle))
+        # Painting step
         yield self.env.process(self.painting_station(vehicle))
+        # Inspection step
         yield self.env.process(self.inspection_station(vehicle))
+        # Testing step
         yield self.env.process(self.testing_station(vehicle))
+        # Packaging step
+        yield self.env.process(self.packaging_station(vehicle))
         vehicle.update_status("completed")
-        self.logger.info("Vehicle %d production completed at simulation time %s", vehicle.id, self.env.now)
+        self.logger.info("Vehicle %d completed production at simulation time %.2f", vehicle.id, self.env.now)
+    
+    def welding_station(self, vehicle):
+        """
+        Simulate the welding station.
+        """
+        vehicle.update_status("welding")
+        vehicle.add_production_step("Welding started")
+        duration = random.uniform(1.0, 3.0)
+        self.logger.debug("Vehicle %d: Welding duration %.2f", vehicle.id, duration)
+        yield self.env.timeout(duration)
+        vehicle.add_production_step("Welding completed")
+        self.logger.debug("Vehicle %d: Welding completed", vehicle.id)
     
     def assembly_station(self, vehicle):
         """
         Simulate the assembly station.
         """
         vehicle.update_status("assembly")
-        duration = random.uniform(*self.station_durations["assembly"])
-        vehicle.add_assembly_step("assembly started")
-        self.logger.debug("Vehicle %d: Assembly started, duration %.2f", vehicle.id, duration)
+        vehicle.add_production_step("Assembly started")
+        duration = random.uniform(2.0, 5.0)
+        self.logger.debug("Vehicle %d: Assembly duration %.2f", vehicle.id, duration)
         yield self.env.timeout(duration)
-        vehicle.add_assembly_step("assembly completed")
+        # Install critical components.
+        vehicle.add_component("Chassis", {"material": "Aluminum", "quality": random.choice(["A", "B", "C"])})
+        vehicle.add_component("Engine", {"type": vehicle.engine_type, "horsepower": random.randint(150, 400)})
+        vehicle.add_production_step("Assembly completed", "Chassis and Engine installed.")
         self.logger.debug("Vehicle %d: Assembly completed", vehicle.id)
     
     def painting_station(self, vehicle):
@@ -145,11 +181,13 @@ class ProductionLine:
         Simulate the painting station.
         """
         vehicle.update_status("painting")
-        duration = random.uniform(*self.station_durations["painting"])
-        vehicle.add_assembly_step("painting started")
-        self.logger.debug("Vehicle %d: Painting started, duration %.2f", vehicle.id, duration)
+        vehicle.add_production_step("Painting started")
+        duration = random.uniform(1.0, 3.0)
+        self.logger.debug("Vehicle %d: Painting duration %.2f", vehicle.id, duration)
         yield self.env.timeout(duration)
-        vehicle.add_assembly_step("painting completed")
+        # Apply a new color.
+        vehicle.color = random.choice(["Red", "Blue", "Green", "Black", "White", "Silver"])
+        vehicle.add_production_step("Painting completed", f"Color applied: {vehicle.color}")
         self.logger.debug("Vehicle %d: Painting completed", vehicle.id)
     
     def inspection_station(self, vehicle):
@@ -157,11 +195,11 @@ class ProductionLine:
         Simulate the inspection station.
         """
         vehicle.update_status("inspection")
-        duration = random.uniform(*self.station_durations["inspection"])
-        vehicle.add_assembly_step("inspection started")
-        self.logger.debug("Vehicle %d: Inspection started, duration %.2f", vehicle.id, duration)
+        vehicle.add_production_step("Inspection started")
+        duration = random.uniform(1.0, 2.5)
+        self.logger.debug("Vehicle %d: Inspection duration %.2f", vehicle.id, duration)
         yield self.env.timeout(duration)
-        vehicle.add_assembly_step("inspection completed")
+        vehicle.add_production_step("Inspection completed")
         self.logger.debug("Vehicle %d: Inspection completed", vehicle.id)
     
     def testing_station(self, vehicle):
@@ -169,12 +207,30 @@ class ProductionLine:
         Simulate the testing station.
         """
         vehicle.update_status("testing")
-        duration = random.uniform(*self.station_durations["testing"])
-        vehicle.add_assembly_step("testing started")
-        self.logger.debug("Vehicle %d: Testing started, duration %.2f", vehicle.id, duration)
+        vehicle.add_production_step("Testing started")
+        duration = random.uniform(2.0, 4.0)
+        self.logger.debug("Vehicle %d: Testing duration %.2f", vehicle.id, duration)
         yield self.env.timeout(duration)
-        vehicle.add_assembly_step("testing completed")
+        # Simulate performance test.
+        performance = random.uniform(0, 1)
+        if performance < 0.5:
+            vehicle.add_production_step("Testing failed", "Performance below threshold")
+            vehicle.mark_for_maintenance()
+        else:
+            vehicle.add_production_step("Testing passed", "Performance meets standard")
         self.logger.debug("Vehicle %d: Testing completed", vehicle.id)
+    
+    def packaging_station(self, vehicle):
+        """
+        Simulate the packaging station.
+        """
+        vehicle.update_status("packaging")
+        vehicle.add_production_step("Packaging started")
+        duration = random.uniform(0.5, 1.5)
+        self.logger.debug("Vehicle %d: Packaging duration %.2f", vehicle.id, duration)
+        yield self.env.timeout(duration)
+        vehicle.add_production_step("Packaging completed", "Vehicle ready for delivery")
+        self.logger.debug("Vehicle %d: Packaging completed", vehicle.id)
     
     def get_produced_count(self):
         """
@@ -184,89 +240,112 @@ class ProductionLine:
     
     def get_vehicle_by_id(self, vehicle_id):
         """
-        Retrieve a vehicle by its identifier.
+        Retrieve a vehicle by its unique identifier.
         """
         for v in self.vehicles:
             if v.id == vehicle_id:
                 return v
         return None
 
+###############################################################################
+# QualityCheck Class
+###############################################################################
 
 class QualityCheck:
     """
-    Simulates the quality control process for vehicles.
-
-    This process periodically picks vehicles and performs a quality check.
+    Performs advanced quality checks on vehicles using multiple criteria.
+    
+    The quality check logic assesses several parameters including assembly accuracy,
+    paint quality, and overall performance. It returns a detailed result.
     """
     def __init__(self, env, production_line):
         self.env = env
         self.production_line = production_line
-        self.check_interval = 5  # Time units between quality checks
-        self.quality_threshold = 0.7  # Minimum score to pass
         self.logger = logger
+        # Define thresholds for quality assessment.
+        self.assembly_threshold = 0.75
+        self.paint_threshold = 0.80
+        self.performance_threshold = 0.70
     
     def run_quality_checks(self):
         """
-        Process that periodically performs quality checks.
+        Periodically run quality checks on random vehicles from the production line.
         """
         while True:
+            yield self.env.timeout(20)
             if self.production_line.vehicles:
                 vehicle = random.choice(self.production_line.vehicles)
-                self.logger.info("Performing quality check on Vehicle %d at simulation time %s", vehicle.id, self.env.now)
+                self.logger.info("Performing advanced quality check on vehicle %d at simulation time %.2f",
+                                 vehicle.id, self.env.now)
                 yield self.env.process(self.perform_quality_check(vehicle))
-            yield self.env.timeout(self.check_interval)
     
     def perform_quality_check(self, vehicle):
         """
-        Perform a quality check on a single vehicle.
-
-        A random score is generated. If the score is above the threshold, the check is passed.
+        Perform an advanced quality check on a single vehicle.
+        The process includes multiple sub-checks and computes an overall quality score.
         """
-        self.logger.debug("Vehicle %d: Quality check started.", vehicle.id)
-        duration = random.uniform(0.5, 1.5)
-        yield self.env.timeout(duration)
-        quality_score = random.random()
-        if quality_score >= self.quality_threshold:
-            result = "passed"
-        else:
-            result = "failed"
-        vehicle.add_quality_check({"score": quality_score, "result": result})
-        self.logger.info("Vehicle %d quality check result: %s (score: %.2f)", vehicle.id, result, quality_score)
+        self.logger.debug("Vehicle %d: Starting advanced quality check.", vehicle.id)
+        yield self.env.timeout(random.uniform(0.5, 1.5))
+        assembly_score = random.uniform(0, 1)
+        paint_score = random.uniform(0, 1)
+        performance_score = random.uniform(0, 1)
+        overall_score = (assembly_score + paint_score + performance_score) / 3.0
+        result = "passed" if (assembly_score >= self.assembly_threshold and 
+                              paint_score >= self.paint_threshold and 
+                              performance_score >= self.performance_threshold) else "failed"
+        detailed_result = {
+            "assembly_score": round(assembly_score, 2),
+            "paint_score": round(paint_score, 2),
+            "performance_score": round(performance_score, 2),
+            "overall_score": round(overall_score, 2),
+            "result": result
+        }
+        vehicle.add_quality_check(detailed_result)
+        self.logger.info("Vehicle %d quality check result: %s", vehicle.id, detailed_result)
 
+###############################################################################
+# Component Class
+###############################################################################
 
 class Component:
     """
-    Represents a component of a vehicle.
-
-    Stores information about the component such as name, type, production time, and other properties.
+    Represents a component of a vehicle with detailed properties.
+    
+    Each component includes name, type, production time, quality grade, and additional specifications.
     """
-    def __init__(self, name, component_type, production_time, properties=None):
+    def __init__(self, name, component_type, production_time, quality_grade=None, specifications=None):
         self.name = name
         self.component_type = component_type
         self.production_time = production_time
-        self.properties = properties if properties is not None else {}
+        self.quality_grade = quality_grade if quality_grade else random.choice(["A", "B", "C"])
+        self.specifications = specifications if specifications is not None else {}
         self.creation_time = time.time()
-        logger.debug("Component %s created of type %s with production time %.2f", self.name, self.component_type, self.production_time)
+        logger.debug("Component %s created: type=%s, production_time=%.2f, quality=%s",
+                     self.name, self.component_type, self.production_time, self.quality_grade)
     
-    def update_property(self, key, value):
-        logger.debug("Component %s: Updating property %s to %s", self.name, key, value)
-        self.properties[key] = value
+    def update_specification(self, key, value):
+        logger.debug("Component %s: Updating specification %s to %s", self.name, key, value)
+        self.specifications[key] = value
     
     def get_details(self):
         return {
             "name": self.name,
             "type": self.component_type,
             "production_time": self.production_time,
-            "properties": self.properties,
+            "quality_grade": self.quality_grade,
+            "specifications": self.specifications,
             "creation_time": self.creation_time
         }
 
+###############################################################################
+# AssemblyStation Class
+###############################################################################
 
 class AssemblyStation:
     """
-    Simulates a station where components are assembled into a vehicle.
-
-    Each station can handle a specific part of the production process.
+    Simulates an assembly station that installs components onto a vehicle.
+    
+    This station processes vehicles and installs various components like interior electronics.
     """
     def __init__(self, env, name, process_time_range=(1, 3)):
         self.env = env
@@ -276,55 +355,69 @@ class AssemblyStation:
         self.processed_components = 0
     
     def assemble(self, vehicle, component_name):
-        """
-        Process to assemble a component onto a vehicle.
-        """
-        self.logger.info("Vehicle %d: Starting assembly at station %s for component %s", vehicle.id, self.name, component_name)
+        self.logger.info("Vehicle %d: Assembly at station %s for component %s started.", vehicle.id, self.name, component_name)
         duration = random.uniform(*self.process_time_range)
         yield self.env.timeout(duration)
         component = Component(component_name, "assembly", duration)
         vehicle.add_component(component_name, component.get_details())
         self.processed_components += 1
-        self.logger.info("Vehicle %d: Assembly at station %s for component %s completed", vehicle.id, self.name, component_name)
+        self.logger.info("Vehicle %d: Assembly at station %s for component %s completed.", vehicle.id, self.name, component_name)
     
     def get_processed_count(self):
-        """
-        Return the number of components processed at this station.
-        """
         return self.processed_components
 
+###############################################################################
+# PaintingStation Class
+###############################################################################
 
-def simulate_production(env, production_line, assembly_stations):
+class PaintingStation:
     """
-    Simulate a production run where vehicles are assembled with components from multiple stations.
-
-    This function iterates over production cycles and assigns vehicles to each assembly station.
+    Simulates a painting station for vehicles.
+    
+    This station applies a coat of paint and ensures even color distribution.
     """
-    while True:
-        vehicle = production_line.produce_vehicle()
-        for station in assembly_stations:
-            yield env.process(station.assemble(vehicle, f"component_{station.name}"))
-        yield env.timeout(1)
+    def __init__(self, env, name, process_time_range=(1, 3)):
+        self.env = env
+        self.name = name
+        self.process_time_range = process_time_range
+        self.logger = logger
+        self.processed_vehicles = 0
+    
+    def paint(self, vehicle):
+        self.logger.info("Vehicle %d: Painting at station %s started.", vehicle.id, self.name)
+        duration = random.uniform(*self.process_time_range)
+        yield self.env.timeout(duration)
+        new_color = random.choice(["Red", "Blue", "Green", "Black", "White", "Silver"])
+        vehicle.color = new_color
+        vehicle.add_production_step("Painted", f"Color applied: {new_color}")
+        self.processed_vehicles += 1
+        self.logger.info("Vehicle %d: Painting at station %s completed.", vehicle.id, self.name)
+    
+    def get_processed_count(self):
+        return self.processed_vehicles
 
+###############################################################################
+# Standalone Test Routine
+###############################################################################
 
 if __name__ == "__main__":
-    # Test the models by running a simple simulation.
+    # Standalone test for the models module.
     test_env = simpy.Environment()
     prod_line = ProductionLine(test_env)
-    quality = QualityCheck(test_env, prod_line)
+    quality_checker = QualityCheck(test_env, prod_line)
+    assembly_station = AssemblyStation(test_env, "Assembly A")
+    painting_station = PaintingStation(test_env, "Painting A")
     
-    # Create a couple of assembly stations.
-    station_a = AssemblyStation(test_env, "A", process_time_range=(1, 2))
-    station_b = AssemblyStation(test_env, "B", process_time_range=(1, 2))
+    # Start production process.
+    test_env.process(prod_line.produce_vehicle())
+    test_env.process(quality_checker.run_quality_checks())
     
-    # Start the production process.
-    test_env.process(prod_line.start_production())
-    test_env.process(quality.run_quality_checks())
-    test_env.process(simulate_production(test_env, prod_line, [station_a, station_b]))
+    def test_station():
+        vehicle = prod_line.produce_vehicle()
+        yield test_env.process(assembly_station.assemble(vehicle, "Infotainment System"))
+        yield test_env.process(painting_station.paint(vehicle))
+        yield test_env.process(prod_line.process_vehicle(vehicle))
+        logger.info("Test vehicle summary: %s", vehicle.get_summary())
     
-    # Run the simulation for a set period.
-    test_env.run(until=30)
-    
-    logger.info("Total vehicles produced: %d", prod_line.get_produced_count())
-    for vehicle in prod_line.vehicles:
-        logger.info("Vehicle %d summary: %s", vehicle.id, vehicle.get_summary())
+    test_env.process(test_station())
+    test_env.run(until=50)

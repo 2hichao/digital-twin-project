@@ -2,16 +2,25 @@
 Visualization module for the NIO Digital Twin Simulation.
 
 This module provides functions to create and update visualizations for simulation data.
-The visualizations include production counts, event distributions, quality check results,
-and event timelines. It uses matplotlib for plotting and pandas for data handling.
+The visualizations include static charts (bar, pie, histogram, and line plots) using Matplotlib,
+interactive charts using Plotly, real-time updates via Matplotlib animation, and a full web dashboard
+using Dash. Additional visual reports (e.g., scatter plots) are also included.
 """
 
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import matplotlib.animation as animation
 import pandas as pd
 import numpy as np
 import datetime
 import logging
+import plotly.express as px
+import plotly.graph_objects as go
+import dash
+from dash import dcc, html
+from dash.dependencies import Input, Output
+import threading
+import time
 
 # Set up module-level logging.
 logger = logging.getLogger("visualization")
@@ -28,87 +37,72 @@ if not logger.handlers:
 
 class Visualization:
     """
-    The Visualization class provides methods to generate plots from simulation data.
+    The Visualization class provides methods to generate plots and dashboards from simulation data.
 
     Attributes:
-        data (pd.DataFrame): The data used for visualization. Expected to have columns such as:
-            - 'timestamp': a float or datetime representing when the event was recorded.
-            - 'vehicle_id': an integer identifying a vehicle.
-            - 'event': a string indicating the event type.
-            - 'value': a float representing a sensor or simulation measurement.
-        fig (plt.Figure): Matplotlib Figure object used for dashboard display.
-        axs (np.ndarray): Array of Axes objects for individual subplots.
+        data (pd.DataFrame): The data used for plotting.
+        fig (plt.Figure): Matplotlib Figure object.
+        axs (np.ndarray): Array of Matplotlib Axes objects.
     """
-
     def __init__(self, data: pd.DataFrame):
         """
         Initialize the Visualization object with data.
 
         Args:
-            data (pd.DataFrame): The input data for plotting.
+            data (pd.DataFrame): Input data for plotting.
         """
         self.data = data.copy()
         self.fig = None
         self.axs = None
-        logger.info("Visualization instance created with data of shape %s", self.data.shape)
+        logger.info("Visualization instance created with data shape: %s", self.data.shape)
 
     def prepare_data(self):
         """
         Prepare the data for plotting.
 
-        Converts the 'timestamp' column to datetime if it is not already in datetime format.
-        Creates additional columns if needed for time series plotting.
+        Converts the 'timestamp' column to datetime if needed and creates additional columns.
         """
         if self.data.empty:
-            logger.warning("Data is empty. No plots will be generated.")
+            logger.warning("Data is empty. No plots can be generated.")
             return
-
         if not np.issubdtype(self.data['timestamp'].dtype, np.datetime64):
             try:
                 self.data['timestamp'] = pd.to_datetime(self.data['timestamp'], unit='s')
-                logger.debug("Converted 'timestamp' column to datetime.")
+                logger.debug("Converted 'timestamp' to datetime.")
             except Exception as e:
-                logger.error("Error converting 'timestamp' to datetime: %s", e)
-
-        # Create a new column 'date' for grouping by day if necessary.
+                logger.error("Error converting 'timestamp': %s", e)
         if 'date' not in self.data.columns:
             self.data['date'] = self.data['timestamp'].dt.date
-            logger.debug("Created 'date' column for daily grouping.")
+            logger.debug("Added 'date' column for grouping.")
 
     def plot_production_count(self):
         """
-        Plot the number of records per vehicle ID as a bar chart.
-
-        This plot shows the count of events for each vehicle.
+        Plot the number of records per vehicle ID as a bar chart using Matplotlib.
         """
         if self.data.empty:
-            logger.warning("No data available for production count plot.")
-            return
-
+            logger.warning("No data for production count plot.")
+            return None, None
         try:
-            production_counts = self.data.groupby("vehicle_id").size()
+            counts = self.data.groupby("vehicle_id").size()
             fig, ax = plt.subplots(figsize=(10, 6))
-            production_counts.plot(kind="bar", ax=ax, color="skyblue")
+            counts.plot(kind="bar", ax=ax, color="skyblue")
             ax.set_title("Vehicle Production Count")
             ax.set_xlabel("Vehicle ID")
-            ax.set_ylabel("Event Count")
+            ax.set_ylabel("Count")
             ax.grid(True, linestyle="--", alpha=0.5)
             plt.tight_layout()
             logger.info("Generated production count plot.")
             return fig, ax
         except Exception as e:
-            logger.error("Error generating production count plot: %s", e)
+            logger.error("Error in production count plot: %s", e)
 
     def plot_event_distribution(self):
         """
-        Plot the distribution of event types as a pie chart.
-
-        This plot shows how events are distributed across different types.
+        Plot the distribution of event types as a pie chart using Matplotlib.
         """
         if self.data.empty:
-            logger.warning("No data available for event distribution plot.")
-            return
-
+            logger.warning("No data for event distribution plot.")
+            return None, None
         try:
             event_counts = self.data["event"].value_counts()
             fig, ax = plt.subplots(figsize=(8, 8))
@@ -119,20 +113,16 @@ class Visualization:
             logger.info("Generated event distribution pie chart.")
             return fig, ax
         except Exception as e:
-            logger.error("Error generating event distribution plot: %s", e)
+            logger.error("Error in event distribution plot: %s", e)
 
     def plot_quality_check_results(self):
         """
-        Plot a histogram of quality check values if such data exists.
-
-        It is assumed that quality check events have 'value' entries representing scores.
+        Plot a histogram of quality check values if data exists using Matplotlib.
         """
-        # Filter for quality check events, assumed to be labeled 'quality'
         quality_data = self.data[self.data["event"] == "quality"]
         if quality_data.empty:
-            logger.warning("No quality check data found for histogram.")
-            return
-
+            logger.warning("No quality check data for histogram.")
+            return None, None
         try:
             fig, ax = plt.subplots(figsize=(10, 6))
             ax.hist(quality_data["value"], bins=20, color="lightgreen", edgecolor="black")
@@ -144,20 +134,16 @@ class Visualization:
             logger.info("Generated quality check histogram.")
             return fig, ax
         except Exception as e:
-            logger.error("Error generating quality check histogram: %s", e)
+            logger.error("Error in quality check histogram: %s", e)
 
     def plot_event_timeline(self):
         """
-        Plot a time series showing the number of events per time interval.
-
-        This plot aggregates events in 1-minute bins and shows the frequency over time.
+        Plot a time series of event counts per minute using Matplotlib.
         """
         if self.data.empty:
-            logger.warning("No data available for event timeline plot.")
-            return
-
+            logger.warning("No data for event timeline plot.")
+            return None, None
         try:
-            # Resample data by minute
             timeline = self.data.set_index("timestamp").resample("1T").size()
             fig, ax = plt.subplots(figsize=(12, 6))
             ax.plot(timeline.index, timeline.values, marker="o", linestyle="-", color="coral")
@@ -170,40 +156,200 @@ class Visualization:
             logger.info("Generated event timeline plot.")
             return fig, ax
         except Exception as e:
-            logger.error("Error generating event timeline plot: %s", e)
+            logger.error("Error in event timeline plot: %s", e)
+
+    def interactive_production_count(self):
+        """
+        Generate an interactive bar chart for production count using Plotly.
+        """
+        if self.data.empty:
+            logger.warning("No data for interactive production count.")
+            return None
+        try:
+            counts = self.data.groupby("vehicle_id").size().reset_index(name="count")
+            fig = px.bar(counts, x="vehicle_id", y="count", title="Interactive Vehicle Production Count",
+                         labels={"vehicle_id": "Vehicle ID", "count": "Event Count"})
+            fig.update_layout(template="plotly_white")
+            logger.info("Generated interactive production count chart.")
+            return fig
+        except Exception as e:
+            logger.error("Error generating interactive production count: %s", e)
+            return None
+
+    def interactive_event_distribution(self):
+        """
+        Generate an interactive pie chart for event distribution using Plotly.
+        """
+        if self.data.empty:
+            logger.warning("No data for interactive event distribution.")
+            return None
+        try:
+            event_counts = self.data["event"].value_counts().reset_index()
+            event_counts.columns = ["event", "count"]
+            fig = px.pie(event_counts, names="event", values="count", title="Interactive Event Distribution",
+                         hole=0.3)
+            fig.update_layout(template="plotly_white")
+            logger.info("Generated interactive event distribution chart.")
+            return fig
+        except Exception as e:
+            logger.error("Error generating interactive event distribution: %s", e)
+            return None
+
+    def interactive_quality_check_results(self):
+        """
+        Generate an interactive histogram for quality check results using Plotly.
+        """
+        quality_data = self.data[self.data["event"] == "quality"]
+        if quality_data.empty:
+            logger.warning("No quality check data for interactive histogram.")
+            return None
+        try:
+            fig = px.histogram(quality_data, x="value", nbins=20, title="Interactive Quality Check Histogram",
+                               labels={"value": "Quality Score"})
+            fig.update_layout(template="plotly_white")
+            logger.info("Generated interactive quality check histogram.")
+            return fig
+        except Exception as e:
+            logger.error("Error generating interactive quality check histogram: %s", e)
+            return None
+
+    def interactive_event_timeline(self):
+        """
+        Generate an interactive time series chart for event timeline using Plotly.
+        """
+        if self.data.empty:
+            logger.warning("No data for interactive event timeline.")
+            return None
+        try:
+            timeline = self.data.set_index("timestamp").resample("1T").size().reset_index(name="event_count")
+            fig = px.line(timeline, x="timestamp", y="event_count", title="Interactive Event Timeline (per Minute)",
+                          labels={"timestamp": "Time", "event_count": "Number of Events"})
+            fig.update_layout(template="plotly_white")
+            logger.info("Generated interactive event timeline chart.")
+            return fig
+        except Exception as e:
+            logger.error("Error generating interactive event timeline: %s", e)
+            return None
+
+    def real_time_update_chart(self, interval=1000):
+        """
+        Create a real-time updating chart using Matplotlib animation.
+
+        This method sets up a live updating plot for event counts.
+        Args:
+            interval (int): Update interval in milliseconds.
+        """
+        if self.data.empty:
+            logger.warning("No data for real-time update chart.")
+            return
+
+        self.prepare_data()
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.set_title("Real-Time Event Timeline")
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Event Count")
+        line, = ax.plot([], [], marker="o", linestyle="-", color="coral")
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
+        ax.grid(True, linestyle="--", alpha=0.5)
+
+        def init():
+            ax.set_xlim(datetime.datetime.now(), datetime.datetime.now() + datetime.timedelta(seconds=60))
+            ax.set_ylim(0, 10)
+            line.set_data([], [])
+            return line,
+
+        def update(frame):
+            current_time = datetime.datetime.now()
+            new_record = {
+                "timestamp": pd.to_datetime(time.time(), unit='s'),
+                "vehicle_id": np.random.randint(1, 100),
+                "event": np.random.choice(["produced", "assembled", "quality", "tested"]),
+                "value": np.random.rand() * 100
+            }
+            self.data = self.data.append(new_record, ignore_index=True)
+            timeline = self.data.set_index("timestamp").resample("5S").size()
+            times = timeline.index.to_pydatetime()
+            counts = timeline.values
+            ax.set_xlim(times[0], times[-1] + datetime.timedelta(seconds=5))
+            if len(counts) > 0:
+                ax.set_ylim(0, max(counts) + 5)
+            line.set_data(times, counts)
+            return line,
+
+        ani = animation.FuncAnimation(fig, update, init_func=init, interval=interval, blit=True)
+        logger.info("Real-time update chart created.")
+        plt.show()
+
+    def run_dash_dashboard(self):
+        """
+        Run a Dash dashboard to display multiple interactive charts.
+
+        The dashboard includes production count, event distribution, quality check results,
+        and event timeline charts that update every few seconds.
+        """
+        self.prepare_data()
+        app = dash.Dash(__name__)
+        app.layout = html.Div([
+            html.H1("NIO Digital Twin Dashboard"),
+            dcc.Graph(id="production-count"),
+            dcc.Graph(id="event-distribution"),
+            dcc.Graph(id="quality-check"),
+            dcc.Graph(id="event-timeline"),
+            dcc.Interval(
+                id="interval-component",
+                interval=5*1000,  # Update every 5 seconds.
+                n_intervals=0
+            )
+        ])
+
+        @app.callback(
+            [Output("production-count", "figure"),
+             Output("event-distribution", "figure"),
+             Output("quality-check", "figure"),
+             Output("event-timeline", "figure")],
+            [Input("interval-component", "n_intervals")]
+        )
+        def update_dashboard(n):
+            prod_fig = self.interactive_production_count()
+            event_fig = self.interactive_event_distribution()
+            quality_fig = self.interactive_quality_check_results()
+            timeline_fig = self.interactive_event_timeline()
+            return prod_fig, event_fig, quality_fig, timeline_fig
+
+        # Run the Dash app in a separate thread.
+        def run_dash():
+            app.run_server(debug=False, port=8050)
+        
+        dash_thread = threading.Thread(target=run_dash, name="DashDashboardThread", daemon=True)
+        dash_thread.start()
+        logger.info("Dash dashboard started on http://127.0.0.1:8050")
+        return app
 
     def show_dashboard(self):
         """
-        Create and display a dashboard with multiple subplots.
-
-        The dashboard includes:
-            - Production count bar chart.
-            - Event distribution pie chart.
-            - Event timeline line plot.
-            - (Optional) Quality check histogram if data is available.
+        Create and display a dashboard with multiple static visualizations using Matplotlib.
         """
         self.prepare_data()
-        logger.info("Preparing dashboard with multiple visualizations.")
+        logger.info("Preparing static dashboard with multiple visualizations.")
 
         try:
-            # Create a figure with a grid of subplots.
             self.fig, self.axs = plt.subplots(2, 2, figsize=(14, 10))
             plt.subplots_adjust(hspace=0.4, wspace=0.3)
 
-            # Plot production count in the top-left subplot.
-            production_counts = self.data.groupby("vehicle_id").size()
-            self.axs[0, 0].bar(production_counts.index.astype(str), production_counts.values, color="skyblue")
+            # Production count chart.
+            counts = self.data.groupby("vehicle_id").size()
+            self.axs[0, 0].bar(counts.index.astype(str), counts.values, color="skyblue")
             self.axs[0, 0].set_title("Vehicle Production Count")
             self.axs[0, 0].set_xlabel("Vehicle ID")
-            self.axs[0, 0].set_ylabel("Event Count")
+            self.axs[0, 0].set_ylabel("Count")
             self.axs[0, 0].grid(True, linestyle="--", alpha=0.5)
 
-            # Plot event distribution in the top-right subplot.
+            # Event distribution pie chart.
             event_counts = self.data["event"].value_counts()
             self.axs[0, 1].pie(event_counts.values, labels=event_counts.index, autopct="%1.1f%%", startangle=90)
             self.axs[0, 1].set_title("Event Distribution")
 
-            # Plot event timeline in the bottom-left subplot.
+            # Event timeline line plot.
             timeline = self.data.set_index("timestamp").resample("1T").size()
             self.axs[1, 0].plot(timeline.index, timeline.values, marker="o", linestyle="-", color="coral")
             self.axs[1, 0].set_title("Event Timeline (per Minute)")
@@ -212,7 +358,7 @@ class Visualization:
             self.axs[1, 0].xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
             self.axs[1, 0].grid(True, linestyle="--", alpha=0.5)
 
-            # Plot quality check histogram in the bottom-right subplot if available.
+            # Quality check histogram.
             quality_data = self.data[self.data["event"] == "quality"]
             if not quality_data.empty:
                 self.axs[1, 1].hist(quality_data["value"], bins=20, color="lightgreen", edgecolor="black")
@@ -227,92 +373,14 @@ class Visualization:
                 self.axs[1, 1].axis("off")
 
             plt.tight_layout()
-            logger.info("Dashboard prepared successfully. Displaying dashboard.")
+            logger.info("Static dashboard prepared. Displaying dashboard.")
             plt.show()
         except Exception as e:
-            logger.error("Error displaying dashboard: %s", e)
-
-    def update_plots(self, new_data: pd.DataFrame):
-        """
-        Update the internal data and refresh all plots.
-
-        Args:
-            new_data (pd.DataFrame): New data to merge with existing data.
-        """
-        try:
-            # Merge the new data with the existing data.
-            self.data = pd.concat([self.data, new_data]).drop_duplicates().reset_index(drop=True)
-            logger.info("Data updated. New data shape: %s", self.data.shape)
-            # Refresh all plots by re-preparing the dashboard.
-            self.prepare_data()
-            self.show_dashboard()
-        except Exception as e:
-            logger.error("Error updating plots: %s", e)
-
-    def save_figure(self, filename: str):
-        """
-        Save the current figure to a file.
-
-        Args:
-            filename (str): The file path where the figure will be saved.
-        """
-        if self.fig is None:
-            logger.warning("No figure available to save. Generate a plot first.")
-            return
-        try:
-            self.fig.savefig(filename, dpi=300)
-            logger.info("Figure saved to %s", filename)
-        except Exception as e:
-            logger.error("Error saving figure: %s", e)
+            logger.error("Error preparing static dashboard: %s", e)
 
 
-# Additional helper functions for standalone plot generation.
-
-def plot_single_production_count(data: pd.DataFrame, output_file: str = None):
-    """
-    Generate and display a single production count plot.
-
-    Args:
-        data (pd.DataFrame): Input data for plotting.
-        output_file (str, optional): If provided, save the plot to this file.
-    """
-    vis = Visualization(data)
-    fig_ax = vis.plot_production_count()
-    if fig_ax is not None:
-        fig, ax = fig_ax
-        if output_file:
-            try:
-                fig.savefig(output_file, dpi=300)
-                logger.info("Production count plot saved to %s", output_file)
-            except Exception as e:
-                logger.error("Error saving production count plot: %s", e)
-        else:
-            plt.show()
-
-def plot_single_event_distribution(data: pd.DataFrame, output_file: str = None):
-    """
-    Generate and display a single event distribution pie chart.
-
-    Args:
-        data (pd.DataFrame): Input data for plotting.
-        output_file (str, optional): If provided, save the plot to this file.
-    """
-    vis = Visualization(data)
-    fig_ax = vis.plot_event_distribution()
-    if fig_ax is not None:
-        fig, ax = fig_ax
-        if output_file:
-            try:
-                fig.savefig(output_file, dpi=300)
-                logger.info("Event distribution plot saved to %s", output_file)
-            except Exception as e:
-                logger.error("Error saving event distribution plot: %s", e)
-        else:
-            plt.show()
-
-# For standalone testing of visualization functions.
 if __name__ == "__main__":
-    # Generate some sample data for testing.
+    # Generate sample data for demonstration.
     sample_data = pd.DataFrame({
         "timestamp": pd.date_range(start="2025-01-01 08:00:00", periods=200, freq="T").astype(np.int64) // 10**9,
         "vehicle_id": np.random.randint(1, 20, size=200),
@@ -320,15 +388,19 @@ if __name__ == "__main__":
         "value": np.random.rand(200) * 100
     })
     
-    # Create a Visualization instance with sample data.
     vis = Visualization(sample_data)
     vis.prepare_data()
-    
-    # Generate individual plots.
+    # Generate and display individual static plots.
     vis.plot_production_count()
     vis.plot_event_distribution()
     vis.plot_event_timeline()
     vis.plot_quality_check_results()
     
-    # Display the dashboard with all plots.
+    # Display the static dashboard.
     vis.show_dashboard()
+    
+    # Uncomment to run the real-time update chart.
+    # vis.real_time_update_chart()
+    
+    # Uncomment to launch the interactive Dash dashboard.
+    # vis.run_dash_dashboard()

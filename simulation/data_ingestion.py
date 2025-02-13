@@ -1,10 +1,10 @@
 """
 Data ingestion module for the NIO Digital Twin Simulation.
 
-This module handles the ingestion of data from sensors and simulation events.
-It collects, processes, and stores the data in memory and writes it to disk.
-Advanced thread management, extended configuration options, and robust error
-recovery routines have been added to support industrial-level usage.
+This module handles the ingestion of data from simulated sensors and simulation events.
+It collects, processes, and stores the data in memory and writes it to disk as CSV files
+as well as persisting the data into a SQLite database. It includes extensive error handling,
+logging, and multiple methods to process and retrieve the data.
 """
 
 import random
@@ -13,6 +13,8 @@ import threading
 import logging
 import pandas as pd
 import os
+import sqlite3
+from sqlite3 import Error
 
 # Set up module-level logging.
 logger = logging.getLogger("data_ingestion")
@@ -27,172 +29,146 @@ if not logger.handlers:
     logger.addHandler(ch)
 
 
-class WorkerThread:
-    """
-    WorkerThread wraps a target function to run in its own thread with error
-    handling and automatic restart capabilities.
-
-    Attributes:
-        name (str): Name of the worker thread.
-        target (callable): The function to execute.
-        args (tuple): Positional arguments for the target function.
-        kwargs (dict): Keyword arguments for the target function.
-        restart_limit (int): Maximum number of restart attempts.
-    """
-    def __init__(self, name, target, args=(), kwargs=None, restart_limit=3):
-        self.name = name
-        self.target = target
-        self.args = args
-        self.kwargs = kwargs if kwargs is not None else {}
-        self.restart_limit = restart_limit
-        self.restart_count = 0
-        self.thread = None
-        self.stop_event = threading.Event()
-        self.lock = threading.Lock()
-
-    def run_wrapper(self):
-        """
-        Execute the target function in a loop. If an exception occurs, log it and
-        attempt to restart the function up to the restart limit.
-        """
-        while not self.stop_event.is_set():
-            try:
-                logger.info("Worker %s started.", self.name)
-                self.target(*self.args, **self.kwargs)
-                logger.info("Worker %s completed normally.", self.name)
-                break  # Exit if target finishes normally.
-            except Exception as e:
-                logger.error("Error in worker %s: %s", self.name, e, exc_info=True)
-                self.restart_count += 1
-                if self.restart_count > self.restart_limit:
-                    logger.error("Worker %s exceeded restart limit. Exiting.", self.name)
-                    break
-                logger.info("Restarting worker %s (attempt %d).", self.name, self.restart_count)
-                time.sleep(2)  # Pause before attempting restart.
-
-    def start(self):
-        """
-        Start the worker thread.
-        """
-        with self.lock:
-            self.stop_event.clear()
-            self.thread = threading.Thread(target=self.run_wrapper, name=self.name)
-            self.thread.daemon = True
-            self.thread.start()
-            logger.info("Worker thread %s started.", self.name)
-
-    def is_alive(self):
-        """
-        Check if the worker thread is still running.
-        """
-        with self.lock:
-            return self.thread is not None and self.thread.is_alive()
-
-    def stop(self):
-        """
-        Signal the worker thread to stop and wait for it to finish.
-        """
-        with self.lock:
-            self.stop_event.set()
-        if self.thread is not None:
-            self.thread.join(timeout=5)
-            logger.info("Worker thread %s stopped.", self.name)
-
-
 class DataIngestion:
     """
     Handles data ingestion for simulation events and sensor data.
 
-    Attributes:
-        data (pd.DataFrame): DataFrame that stores ingested records.
-        running (bool): Flag indicating if ingestion is running.
-        lock (threading.Lock): Lock for thread-safe operations on the data.
-        flush_interval (int): Time interval in seconds to flush data to disk.
-        output_file (str): File path for storing ingested data.
-        ingestion_interval_min (float): Minimum delay between ingestions.
-        ingestion_interval_max (float): Maximum delay between ingestions.
-        ingestion_worker (WorkerThread): Worker thread for data ingestion.
-        flush_worker (WorkerThread): Worker thread for data flushing.
-        config (dict): Configuration dictionary for various parameters.
+    This class collects data records from simulated sensor readings and events.
+    It stores the data in an in-memory DataFrame and writes it to a CSV file and a SQLite database
+    at regular intervals. It also provides methods to process and retrieve data.
     """
-    def __init__(self, config=None):
-        # Default configuration parameters.
-        default_config = {
-            "flush_interval": 10,
-            "output_file": "ingested_data.csv",
-            "ingestion_interval_min": 0.1,
-            "ingestion_interval_max": 0.5,
-            "columns": ["timestamp", "vehicle_id", "event", "value"],
-            "restart_limit": 3
-        }
-        # Merge provided config with defaults.
-        if config is None:
-            config = {}
-        self.config = {**default_config, **config}
-        
-        # Initialize an empty DataFrame.
-        self.data = pd.DataFrame(columns=self.config["columns"])
+
+    def __init__(self, flush_interval=10, output_file="ingested_data.csv", db_file="ingestion_data.db"):
+        # Create an empty DataFrame with defined columns.
+        self.data = pd.DataFrame(columns=["timestamp", "vehicle_id", "event", "value"])
         self.running = False
         self.lock = threading.Lock()
-        self.flush_interval = self.config["flush_interval"]
-        self.output_file = self.config["output_file"]
-        self.ingestion_interval_min = self.config["ingestion_interval_min"]
-        self.ingestion_interval_max = self.config["ingestion_interval_max"]
-        self.ingestion_worker = None
-        self.flush_worker = None
+        self.flush_interval = flush_interval
+        self.output_file = output_file
+        self.db_file = db_file
+        self.ingestion_thread = None
+        self.flush_thread = None
+
+        # Initialize the database.
+        self._init_db()
+
+        logger.info("DataIngestion instance created with flush_interval=%d, output_file=%s, db_file=%s",
+                    flush_interval, output_file, db_file)
+
+    def _init_db(self):
+        """
+        Initialize the SQLite database.
         
-        logger.info("DataIngestion instance created with config: %s", self.config)
-    
+        Creates a table for ingested data if it does not already exist.
+        """
+        try:
+            conn = sqlite3.connect(self.db_file)
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS ingestion_data (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp REAL,
+                    vehicle_id INTEGER,
+                    event TEXT,
+                    value REAL
+                )
+            ''')
+            conn.commit()
+            conn.close()
+            logger.info("Database initialized and table ensured.")
+        except Error as e:
+            logger.error("Error initializing database: %s", e)
+
+    def _insert_record_db(self, record):
+        """
+        Insert a single record into the SQLite database.
+        
+        Args:
+            record (dict): A dictionary containing the record data.
+        """
+        try:
+            conn = sqlite3.connect(self.db_file)
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO ingestion_data (timestamp, vehicle_id, event, value)
+                VALUES (?, ?, ?, ?)
+            ''', (record["timestamp"], record["vehicle_id"], record["event"], record["value"]))
+            conn.commit()
+            conn.close()
+            logger.debug("Record inserted into database: %s", record)
+        except Error as e:
+            logger.error("Error inserting record into database: %s", e)
+
+    def get_sensor_data(self):
+        """
+        Simulate the retrieval of sensor data from a real sensor.
+
+        Returns:
+            dict: A dictionary with sensor data.
+        """
+        try:
+            # Simulate a sensor reading.
+            timestamp = time.time()
+            vehicle_id = random.randint(1, 1000)
+            event = random.choice(["produced", "assembled", "tested", "inspected", "packaged"])
+            value = random.uniform(0, 100)
+            sensor_data = {
+                "timestamp": timestamp,
+                "vehicle_id": vehicle_id,
+                "event": event,
+                "value": value
+            }
+            logger.debug("Simulated sensor data: %s", sensor_data)
+            return sensor_data
+        except Exception as e:
+            logger.error("Error retrieving sensor data: %s", e)
+            return None
+
     def _ingest_data(self):
         """
-        Simulate the ingestion of data from sensors or simulation events.
+        Continuously ingest data from simulated sensors and events.
 
-        This method runs in a loop, generating new data records and appending them
-        to the in-memory DataFrame with robust error handling.
+        This method simulates reading data from real sensors or production systems,
+        and appends each record to the in-memory DataFrame as well as inserts it into the database.
         """
         logger.info("Data ingestion thread started.")
         while self.running:
             try:
-                timestamp = time.time()
-                vehicle_id = random.randint(1, 1000)
-                event = random.choice(["produced", "assembled", "tested", "inspected", "quality", "packaged"])
-                value = random.uniform(0, 100)
-                record = {"timestamp": timestamp, "vehicle_id": vehicle_id, "event": event, "value": value}
-                
-                with self.lock:
-                    self.data = self.data.append(record, ignore_index=True)
-                
-                logger.debug("Ingested record: %s", record)
-                # Sleep for a random interval to simulate sensor delay.
-                time.sleep(random.uniform(self.ingestion_interval_min, self.ingestion_interval_max))
+                record = self.get_sensor_data()
+                if record:
+                    with self.lock:
+                        self.data = self.data.append(record, ignore_index=True)
+                    # Insert the record into the database.
+                    self._insert_record_db(record)
+                time.sleep(random.uniform(0.1, 0.5))
             except Exception as e:
-                logger.error("Error during ingestion: %s", e, exc_info=True)
-                # Recovery: pause briefly before retrying.
+                logger.error("Error during data ingestion loop: %s", e)
                 time.sleep(1)
         logger.info("Data ingestion thread stopping.")
-    
+
     def _flush_data_periodically(self):
         """
-        Flush the in-memory data to disk at regular intervals.
+        Periodically flush the in-memory data to a CSV file.
 
-        This method runs in a loop, calling flush_data() every flush_interval seconds.
+        This method writes the in-memory DataFrame to a CSV file at regular intervals
+        and then clears the DataFrame.
         """
-        logger.info("Data flush thread started. Flush interval: %d seconds", self.flush_interval)
+        logger.info("Data flush thread started. Flushing every %d seconds.", self.flush_interval)
         while self.running:
             try:
                 time.sleep(self.flush_interval)
                 self.flush_data()
             except Exception as e:
-                logger.error("Error during data flush: %s", e, exc_info=True)
-        # Final flush upon stopping.
+                logger.error("Error during periodic data flush: %s", e)
+        # Final flush after stopping.
         self.flush_data()
         logger.info("Data flush thread stopping.")
-    
+
     def flush_data(self):
         """
-        Write the in-memory DataFrame to a CSV file and clear the DataFrame.
+        Write the in-memory data to a CSV file.
 
-        If the file exists, data is appended without headers; otherwise, a new file is created.
+        After writing, the in-memory DataFrame is cleared.
         """
         with self.lock:
             try:
@@ -202,96 +178,77 @@ class DataIngestion:
                     else:
                         self.data.to_csv(self.output_file, index=False)
                     logger.info("Flushed %d records to %s", len(self.data), self.output_file)
-                    # Clear the DataFrame after flushing.
-                    self.data = pd.DataFrame(columns=self.config["columns"])
+                    self.data = pd.DataFrame(columns=["timestamp", "vehicle_id", "event", "value"])
                 else:
                     logger.debug("No new data to flush.")
             except Exception as e:
-                logger.error("Error flushing data to disk: %s", e, exc_info=True)
-    
-    def start(self):
-        """
-        Start the data ingestion and flushing processes using WorkerThread.
-        """
-        if self.running:
-            logger.warning("Data ingestion is already running.")
-            return
-        self.running = True
-        self.ingestion_worker = WorkerThread(
-            name="DataIngestionWorker",
-            target=self._ingest_data,
-            restart_limit=self.config["restart_limit"]
-        )
-        self.ingestion_worker.start()
-        self.flush_worker = WorkerThread(
-            name="DataFlushWorker",
-            target=self._flush_data_periodically,
-            restart_limit=self.config["restart_limit"]
-        )
-        self.flush_worker.start()
-        logger.info("Data ingestion and flush workers started.")
-    
-    def stop(self):
-        """
-        Stop the data ingestion and flushing processes.
-        """
-        if not self.running:
-            logger.warning("Data ingestion is not running.")
-            return
-        self.running = False
-        if self.ingestion_worker:
-            self.ingestion_worker.stop()
-        if self.flush_worker:
-            self.flush_worker.stop()
-        logger.info("Data ingestion stopped.")
-    
+                logger.error("Error flushing data to CSV: %s", e)
+
     def get_latest_data(self, num_records=100):
         """
-        Retrieve the latest 'num_records' from the in-memory data.
+        Return the latest records from the in-memory data.
+
+        Args:
+            num_records (int): The number of recent records to return.
+
+        Returns:
+            pd.DataFrame: A DataFrame containing the latest records.
         """
         with self.lock:
-            return self.data.tail(num_records).copy()
-    
+            try:
+                return self.data.tail(num_records).copy()
+            except Exception as e:
+                logger.error("Error retrieving latest data: %s", e)
+                return pd.DataFrame()
+
     def get_all_data(self):
         """
-        Retrieve all in-memory data.
+        Return a copy of all the data currently stored in memory.
+
+        Returns:
+            pd.DataFrame: A DataFrame with all the data.
         """
         with self.lock:
-            return self.data.copy()
-    
+            try:
+                return self.data.copy()
+            except Exception as e:
+                logger.error("Error retrieving all data: %s", e)
+                return pd.DataFrame()
+
     def clear_data(self):
         """
-        Clear the in-memory data.
+        Clear all in-memory data.
         """
         with self.lock:
-            self.data = pd.DataFrame(columns=self.config["columns"])
-        logger.info("In-memory data cleared.")
-    
+            self.data = pd.DataFrame(columns=["timestamp", "vehicle_id", "event", "value"])
+            logger.info("In-memory data cleared.")
+
     def simulate_bulk_ingestion(self, num_records=1000):
         """
-        Simulate the ingestion of a large number of records in a tight loop.
+        Simulate the ingestion of a large number of records.
+
+        This method is useful for testing data processing performance.
+        Args:
+            num_records (int): The number of records to simulate.
         """
         logger.info("Starting bulk ingestion of %d records.", num_records)
         for _ in range(num_records):
             try:
-                record = {
-                    "timestamp": time.time(),
-                    "vehicle_id": random.randint(1, 1000),
-                    "event": random.choice(["produced", "assembled", "tested", "inspected", "quality", "packaged"]),
-                    "value": random.uniform(0, 100)
-                }
-                with self.lock:
-                    self.data = self.data.append(record, ignore_index=True)
+                record = self.get_sensor_data()
+                if record:
+                    with self.lock:
+                        self.data = self.data.append(record, ignore_index=True)
+                    self._insert_record_db(record)
             except Exception as e:
-                logger.error("Error during bulk ingestion: %s", e, exc_info=True)
+                logger.error("Error during bulk ingestion: %s", e)
         logger.info("Bulk ingestion completed.")
-    
+
     def process_data(self):
         """
         Process the in-memory data to generate summary statistics.
-        
+
         Returns:
-            dict: A summary dictionary with counts for each event type.
+            dict: A dictionary with counts of records per event type.
         """
         with self.lock:
             try:
@@ -299,42 +256,68 @@ class DataIngestion:
                     logger.warning("No data available for processing.")
                     return {}
                 summary = self.data.groupby("event").size().to_dict()
-                logger.info("Processed data summary: %s", summary)
+                logger.info("Data processing summary: %s", summary)
                 return summary
             except Exception as e:
-                logger.error("Error during data processing: %s", e, exc_info=True)
+                logger.error("Error processing data: %s", e)
                 return {}
-    
+
     def run_ingestion_loop(self):
         """
-        Demonstration loop for data ingestion.
+        Run a demonstration loop for data ingestion and processing.
 
-        This method starts the ingestion, runs for a set period, stops ingestion,
-        flushes data, and outputs summary statistics.
+        This method starts the ingestion and flush threads, runs for a set period,
+        then stops ingestion, flushes data, and prints a summary.
         """
         logger.info("Starting demonstration ingestion loop.")
         self.start()
         try:
-            # Run for a fixed period, e.g., 20 seconds.
-            time.sleep(20)
+            # Run the ingestion for a fixed period.
+            time.sleep(15)
         except KeyboardInterrupt:
             logger.info("Keyboard interrupt received during ingestion loop.")
         finally:
             self.stop()
+            # Final flush after stopping.
             self.flush_data()
             summary = self.process_data()
-            logger.info("Final data summary: %s", summary)
+            logger.info("Final data processing summary: %s", summary)
             logger.info("Demonstration ingestion loop finished.")
+
+    def start(self):
+        """
+        Start the data ingestion process along with periodic data flushing.
+        """
+        if self.running:
+            logger.warning("Data ingestion is already running.")
+            return
+        self.running = True
+        self.ingestion_thread = threading.Thread(
+            target=self._ingest_data, name="DataIngestionThread", daemon=True
+        )
+        self.ingestion_thread.start()
+        self.flush_thread = threading.Thread(
+            target=self._flush_data_periodically, name="DataFlushThread", daemon=True
+        )
+        self.flush_thread.start()
+        logger.info("Data ingestion and flush threads started.")
+
+    def stop(self):
+        """
+        Stop the data ingestion process and wait for threads to finish.
+        """
+        if not self.running:
+            logger.warning("Data ingestion is not running.")
+            return
+        self.running = False
+        if self.ingestion_thread is not None:
+            self.ingestion_thread.join(timeout=5)
+        if self.flush_thread is not None:
+            self.flush_thread.join(timeout=5)
+        logger.info("Data ingestion stopped.")
 
 
 if __name__ == "__main__":
     # Standalone test for the DataIngestion module.
-    config = {
-        "flush_interval": 5,
-        "output_file": "test_ingested_data.csv",
-        "ingestion_interval_min": 0.1,
-        "ingestion_interval_max": 0.3,
-        "restart_limit": 3
-    }
-    ingestion = DataIngestion(config=config)
+    ingestion = DataIngestion(flush_interval=5, output_file="test_ingested_data.csv", db_file="test_ingestion_data.db")
     ingestion.run_ingestion_loop()
